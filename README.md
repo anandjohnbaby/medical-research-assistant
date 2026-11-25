@@ -390,7 +390,3 @@ They cover safety rules, PII redaction, the source allowlist, study-type tiers, 
 - **Latency.** A full run with verification and correction can take over a minute.
 
 ---
-
-## License
-
-Add a license of your choice (for example MIT) as `LICENSE` in the repository root.
