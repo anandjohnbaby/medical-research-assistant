@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MedVerify AI</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">+</span> MedVerify AI</div>
+    <button id="adminBtn" class="ghost">Admin</button>
+  </header>
+  <div class="banner" role="note">
+    Research information only. Not medical advice. In an emergency contact your local emergency services.
+  </div>
+
+  <main class="layout">
+    <section class="chat" aria-label="Conversation">
+      <div id="messages" class="messages" aria-live="polite">
+        <div class="msg assistant">
+          <p>Ask a medical research question. I search PubMed and trusted sources, cite every statement,
+          and fact-check my own answer before showing it.</p>
+        </div>
+      </div>
+      <div class="chips" id="chips">
+        <button class="chip">Does metformin reduce cardiovascular risk in type 2 diabetes?</button>
+        <button class="chip">Is vitamin D supplementation effective for preventing fractures?</button>
+        <button class="chip">How effective are statins for primary prevention?</button>
+      </div>
+      <form id="form" class="composer">
+        <textarea id="q" rows="2" maxlength="1000" placeholder="Ask a medical research question..." required></textarea>
+        <button id="send" type="submit">Ask</button>
+      </form>
+    </section>
+
+    <aside class="panel" aria-label="Evidence details">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="evidence" role="tab">Evidence</button>
+        <button class="tab" data-tab="claims" role="tab">Claim checks</button>
+        <button class="tab" data-tab="trace" role="tab">Pipeline</button>
+      </div>
+      <div id="tab-evidence" class="tabbody"><p class="muted">Sources for the latest answer appear here.</p></div>
+      <div id="tab-claims" class="tabbody hidden"></div>
+      <div id="tab-trace" class="tabbody hidden"></div>
+    </aside>
+  </main>
+
+  <dialog id="adminDlg">
+    <form method="dialog" class="dlg-head"><h3>Admin: knowledge base</h3><button class="ghost">Close</button></form>
+    <label>Admin key<input id="adminKey" type="password" autocomplete="off" /></label>
+    <hr />
+    <h4>Upload a document (PDF, DOCX, TXT, MD)</h4>
+    <label>Source name<input id="srcName" type="text" value="Uploaded document" /></label>
+    <input id="adminFile" type="file" accept=".pdf,.docx,.txt,.md" />
+    <button id="uploadBtn" type="button">Upload</button>
+    <hr />
+    <h4>Import from PubMed</h4>
+    <label>PubMed query<input id="pmQuery" type="text" placeholder="e.g. gout treatment AND randomized controlled trial[pt]" /></label>
+    <label>Max results<input id="pmMax" type="number" min="1" max="100" value="20" /></label>
+    <button id="pmBtn" type="button">Import</button>
+    <p id="adminStatus" class="muted"></p>
+  </dialog>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
