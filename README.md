@@ -10,33 +10,39 @@ MedVerify AI retrieves evidence from a private knowledge base, live PubMed and a
 
 ## Table of contents
 
-- [Features](#features)
+- [What I implemented](#what-i-implemented)
 - [Architecture](#architecture)
+- [Run the project](#run-the-project)
+- [Seeding the knowledge base](#seeding-the-knowledge-base)
+- [Using the app](#using-the-app)
 - [Medical-domain safeguards](#medical-domain-safeguards)
 - [Tech stack](#tech-stack)
 - [Project structure](#project-structure)
-- [Getting started](#getting-started)
-- [Seeding the knowledge base](#seeding-the-knowledge-base)
-- [Using the app](#using-the-app)
 - [API reference](#api-reference)
 - [Configuration](#configuration)
 - [Testing](#testing)
+- [Engineering notes](#engineering-notes)
 - [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
 
 ---
 
-## Features
+## What I implemented
 
-- **Agentic workflow** built with LangGraph: safety gate, routing, retrieval, evidence grading, generation, claim verification and correction.
-- **Multi-source evidence:** Pinecone knowledge base, live PubMed (NCBI E-utilities) and a trusted-domain web fallback.
-- **Claim-level verification:** every statement is checked against its cited passage and labelled `SUPPORTED`, `UNSUPPORTED` or `CONTRADICTED`. A deterministic check confirms that quoted excerpts really exist in the source.
-- **Self-correction loop:** failing claims are rewritten or removed, then re-verified.
-- **Transparency UI:** evidence panel, per-claim verdicts and a step-by-step pipeline trace for every answer.
-- **Computed confidence:** High, Moderate, Low or Insufficient, derived from verification results and evidence quality, not guessed by the LLM.
-- **Strict structured outputs:** every LLM step that returns JSON uses a JSON schema, with retries and a safe fallback.
-- **Dockerised** FastAPI backend with a plain HTML, CSS and JavaScript frontend.
-- **Free to run:** Groq, Pinecone Starter, Tavily free tier, PubMed and local embeddings.
+| Area | What was built | Where |
+|---|---|---|
+| Agentic workflow | LangGraph state machine with safety gate, router, query understanding, retrieval, evidence grading, web fallback, generation, claim verification, correction loop and finalisation | `app/rag/` |
+| Multi-source retrieval | Pinecone knowledge base with local embeddings, live PubMed search through NCBI E-utilities, and a Tavily web fallback limited to trusted domains | `app/services/vectorstore.py`, `pubmed.py`, `web_search.py` |
+| Claim-level verification | Each claim is labelled `SUPPORTED`, `UNSUPPORTED` or `CONTRADICTED`. A deterministic check confirms that quoted excerpts exist in the source. | `app/rag/nodes.py` |
+| Self-correction | Failing claims are rewritten or removed, then re-verified for a limited number of rounds | `app/rag/nodes.py` |
+| Strict structured outputs | JSON schemas for every LLM step that returns JSON, with retries and a safe fallback | `app/rag/schemas.py`, `app/services/llm.py` |
+| Medical safety rules | Emergency, self-harm and personal-treatment detection, source allowlist, evidence tiers, retraction filtering, mandatory disclaimer | `app/core/` |
+| Confidence scoring | High, Moderate, Low or Insufficient, computed from verification results and evidence quality | `app/services/confidence.py` |
+| Knowledge-base ingestion | PDF, DOCX, TXT and MD upload, paragraph-aware chunking, and a PubMed seeding script | `app/services/ingestion.py`, `scripts/` |
+| Privacy and audit | PII redaction before logging or external calls, SQLite audit trail of evidence, verdicts and models | `app/services/pii.py`, `audit.py` |
+| Backend | FastAPI with rate limiting, admin-key protection and security headers | `app/api/`, `app/main.py` |
+| Frontend | Plain HTML, CSS and JavaScript chat UI with evidence, claim-check and pipeline panels | `templates/`, `static/` |
+| Packaging and tests | Dockerfile, Docker Compose and offline pytest suite | repository root, `tests/` |
 
 ---
 
@@ -45,33 +51,30 @@ MedVerify AI retrieves evidence from a private knowledge base, live PubMed and a
 ### Agentic RAG workflow
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 15, "rankSpacing": 20, "padding": 4}, "themeVariables": {"fontSize": "12px"}}}%%
 flowchart TD
-    U["User question"] --> S{"1. Safety gate<br/>(rules)"}
-    S -- "Emergency or self-harm" --> E["Fixed safety message<br/>(no research answer)"]
-    S -- "Clear" --> R{"2. Router<br/>(LLM)"}
-    R -- "Non-medical" --> D["Direct answer<br/>(no retrieval)"]
-    R -- "Medical" --> Q["3. Query understanding<br/>PubMed query and web query"]
-
-    Q --> K["4a. Pinecone KB search<br/>(top-k, local embeddings)"]
-    Q --> P["4b. Live PubMed search<br/>(retracted papers dropped)"]
-    K --> G{"5. Evidence grader<br/>(LLM)"}
+    U(["User question"]) --> S{"1. Safety gate"}
+    S -- "Emergency or self-harm" --> E["Fixed safety message"]
+    S -- "Clear" --> R{"2. Router (LLM)"}
+    R -- "Non-medical" --> D["Direct answer"]
+    R -- "Medical" --> Q["3. Query understanding"]
+    Q --> K["4a. Pinecone KB search"]
+    Q --> P["4b. Live PubMed search"]
+    K --> G{"5. Evidence grader"}
     P --> G
-
-    G -- "GOOD" --> GEN["7. Generate answer<br/>(every sentence cited)"]
-    G -- "WEAK (first time)" --> W["6. Trusted-domain web search<br/>(Tavily, allowlist only)"]
+    G -- "GOOD" --> GEN["7. Generate cited answer"]
+    G -- "WEAK, first time" --> W["6. Trusted web search (Tavily)"]
     W --> G
-    G -- "WEAK (after web)" --> RW["Rewrite query<br/>(limited retries)"]
+    G -- "WEAK, after web" --> RW["Rewrite query"]
     RW --> Q
-    G -- "WEAK (retries used)" --> INS["Insufficient-evidence reply"]
-
-    GEN --> V{"8. Claim verifier<br/>(LLM + excerpt check)"}
-    V -- "All claims supported" --> F["10. Finalize<br/>citations, confidence, disclaimer"]
+    G -- "WEAK, retries used" --> INS["Insufficient-evidence reply"]
+    GEN --> V{"8. Claim verifier"}
+    V -- "All supported" --> F["10. Finalize"]
     V -- "Failures, rounds left" --> C["9. Corrector"]
     C --> V
     V -- "Failures, no rounds left" --> F
     V -- "Nothing verified" --> INS
-
-    F --> OUT["Final answer to user"]
+    F --> OUT(["Final answer"])
     INS --> OUT
     D --> OUT
     E --> OUT
@@ -80,24 +83,25 @@ flowchart TD
 ### System components
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 15, "rankSpacing": 25, "padding": 4}, "themeVariables": {"fontSize": "12px"}}}%%
 flowchart LR
     subgraph Client["Browser"]
-        UI["HTML, CSS, JavaScript<br/>chat, evidence, claim checks, pipeline trace"]
+        UI["HTML, CSS, JavaScript UI"]
     end
 
     subgraph Backend["FastAPI backend (Docker)"]
-        API["REST API<br/>/api/chat, /api/ingest, /api/feedback"]
-        WF["LangGraph workflow<br/>app/rag"]
-        SVC["Services<br/>PII redaction, confidence, audit, ingestion"]
-        EMB["Local embeddings<br/>sentence-transformers"]
-        DB[("SQLite<br/>audit trail")]
+        API["REST API"]
+        WF["LangGraph workflow"]
+        SVC["Services: PII, confidence, audit, ingestion"]
+        EMB["Local embeddings"]
+        DB[("SQLite audit trail")]
     end
 
     subgraph External["Free external services"]
-        LLM["Groq<br/>LLM inference"]
-        PC[("Pinecone<br/>vector index")]
-        PM["PubMed<br/>NCBI E-utilities"]
-        TV["Tavily<br/>trusted-domain web search"]
+        LLM["Groq LLM"]
+        PC[("Pinecone")]
+        PM["PubMed"]
+        TV["Tavily"]
     end
 
     UI <--> API
@@ -106,9 +110,9 @@ flowchart LR
     WF --> LLM
     WF --> PM
     WF --> TV
+    WF --> PC
     SVC --> EMB
     EMB --> PC
-    WF --> PC
     SVC --> DB
 ```
 
@@ -119,13 +123,149 @@ flowchart LR
 | 1. Safety gate | Rule-based detection of emergencies, self-harm and personal-treatment questions. Emergencies get a fixed message and no research answer. |
 | 2. Router | An LLM decides whether the message is a medical question or general conversation. |
 | 3. Query understanding | The question is converted into a PubMed query and a web query. |
-| 4. Retrieval | Pinecone knowledge-base search and live PubMed search run, with retracted papers excluded. |
+| 4. Retrieval | Pinecone knowledge-base search and live PubMed search run, with retracted papers excluded. Fetched PubMed papers are cached into the knowledge base in the background. |
 | 5. Evidence grading | Sources are scored for relevance and ranked by study type. The result is GOOD or WEAK. |
-| 6. Web fallback | If evidence is weak, Tavily searches only allowlisted domains such as nih.gov, who.int, cdc.gov and fda.gov. |
+| 6. Web fallback | If evidence is weak, Tavily searches only allowlisted domains such as nih.gov, who.int, cdc.gov and fda.gov. If it is still weak, the query is rewritten and retried a limited number of times. |
 | 7. Generation | The answer may use only the numbered evidence and must cite it. |
-| 8. Claim verification | Each claim is checked against its cited passage. Supported claims need an excerpt that exists in the source. |
+| 8. Claim verification | Each claim is checked against its cited passage. A supported claim needs an excerpt that actually exists in the source. |
 | 9. Correction | Failing claims are rewritten or removed, then re-verified for a limited number of rounds. |
-| 10. Finalize | Citations are numbered, source disagreements are flagged, confidence is computed and a disclaimer is attached. |
+| 10. Finalize | Citations are numbered, source disagreements are flagged, confidence is computed and a disclaimer is attached. If nothing could be verified, the reply is a transparent "insufficient evidence" message. |
+
+---
+
+## Run the project
+
+### 1. Get free API keys
+
+| Service | Where | Used for |
+|---|---|---|
+| Groq | console.groq.com | LLM inference |
+| Pinecone | app.pinecone.io (Starter plan) | Vector database |
+| Tavily | app.tavily.com | Trusted web search |
+| NCBI (optional) | ncbi.nlm.nih.gov/account | Higher PubMed rate limit |
+
+### 2. Configure
+
+Windows (PowerShell):
+```powershell
+copy .env.example .env
+```
+
+macOS or Linux:
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in your keys. Set `GROQ_FAST_MODEL` and `GROQ_STRONG_MODEL` to models your Groq key can use (this project runs on `openai/gpt-oss-20b` and `openai/gpt-oss-120b`). Never commit `.env`.
+
+### 3a. Option A: run with Docker (recommended)
+
+```bash
+docker compose up --build -d
+docker compose logs -f
+```
+
+Open <http://localhost:8000>. If port 8000 is taken, change the mapping in `docker-compose.yml`, for example `"8080:8000"`.
+
+### 3b. Option B: run locally without Docker
+
+Requires Python 3.10 to 3.12.
+
+Windows (PowerShell):
+```powershell
+python -m venv venv
+venv\Scripts\activate
+pip install --default-timeout=120 --retries 10 -r requirements.txt
+python run.py
+```
+
+macOS or Linux:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python run.py
+```
+
+The first start downloads the embedding model (about 90 MB). Open <http://127.0.0.1:8000>.
+
+### 4. Check that it is healthy
+
+```bash
+curl http://localhost:8000/api/health
+```
+
+Expected: `{"status":"ok","groq":true,"pinecone":true,"tavily":true}`. A `false` value means that key is missing in `.env`.
+
+### 5. Seed the knowledge base (optional, recommended)
+
+See the next section.
+
+---
+
+## Seeding the knowledge base
+
+Seeding is optional, since live PubMed search works without it, but it makes answers faster and richer. It loads systematic reviews, meta-analyses, randomised trials and guidelines into Pinecone.
+
+With Docker:
+```bash
+# Default topics (diabetes, hypertension, statins, asthma, vitamin D,
+# COVID-19 vaccines, antibiotic resistance, migraine, mammography, depression)
+docker compose exec medverify python -m scripts.ingest_seed_kb
+
+# Your own topics
+docker compose exec medverify python -m scripts.ingest_seed_kb "gout treatment" "migraine prevention"
+```
+
+Without Docker (virtual environment active):
+```bash
+python -m scripts.ingest_seed_kb
+python -m scripts.ingest_seed_kb "gout treatment" "migraine prevention"
+```
+
+Inspect what retrieval returns for a query, without involving the LLM:
+
+Windows (PowerShell, Docker):
+```powershell
+Get-Content scripts\test_retrieval.py | docker compose exec -T medverify python - "Does metformin reduce cardiovascular risk?"
+```
+
+macOS, Linux or Git Bash (Docker):
+```bash
+docker compose exec -T medverify python - "Does metformin reduce cardiovascular risk?" < scripts/test_retrieval.py
+```
+
+Without Docker:
+```bash
+python -m scripts.test_retrieval "Does metformin reduce cardiovascular risk?"
+```
+
+You can also upload your own PDF, DOCX, TXT or MD files from the **Admin** panel in the UI, using your `ADMIN_API_KEY`.
+
+---
+
+## Using the app
+
+Ask a medical research question, for example:
+
+> Does metformin reduce cardiovascular risk in type 2 diabetes?
+
+The right-hand panel explains the answer:
+
+- **Evidence:** every cited source with study type, year, journal, PMID or DOI and the supporting passage.
+- **Claim checks:** each statement with its verdict, including claims that were removed.
+- **Pipeline:** the full path the agent took, with timing.
+
+Things worth trying:
+
+| Input | Expected behaviour |
+|---|---|
+| A question matching a seeded topic | Answer with knowledge-base and PubMed sources |
+| A medical question outside the seeded topics | Live PubMed and possibly trusted web fallback |
+| `Hello` | Direct reply, no retrieval |
+| `I have chest pain and can't breathe` | Emergency message, no research answer |
+| `Should I stop taking my statin?` | General research answer with a personal-advice notice |
+| A fictional or nonsense medical question | Transparent "insufficient evidence" reply |
 
 ---
 
@@ -150,7 +290,7 @@ flowchart LR
 |---|---|
 | Orchestration | LangGraph |
 | Backend | FastAPI, Pydantic, Uvicorn |
-| LLM | Groq (`openai/gpt-oss-120b` and `openai/gpt-oss-20b` by default) |
+| LLM | Groq (`openai/gpt-oss-120b` and `openai/gpt-oss-20b`) |
 | Embeddings | `sentence-transformers` (local, free) |
 | Vector database | Pinecone Starter (free) |
 | Literature | PubMed via NCBI E-utilities |
@@ -194,110 +334,12 @@ medverify-ai/
 ├── static/                      # CSS and JavaScript
 ├── templates/index.html         # frontend page
 ├── tests/test_basic.py          # offline unit tests
+├── run.py                       # local development entry point
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
 └── .env.example
 ```
-
----
-
-## Getting started
-
-### 1. Get free API keys
-
-| Service | Where | Used for |
-|---|---|---|
-| Groq | console.groq.com | LLM inference |
-| Pinecone | app.pinecone.io (Starter plan) | Vector database |
-| Tavily | app.tavily.com | Trusted web search |
-| NCBI (optional) | ncbi.nlm.nih.gov/account | Higher PubMed rate limit |
-
-### 2. Configure
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill in your keys. Never commit this file.
-
-### 3a. Run with Docker (recommended)
-
-```bash
-docker compose up --build -d
-docker compose logs -f
-```
-
-Open <http://localhost:8000>. If port 8000 is taken, change the mapping in `docker-compose.yml`, for example `"8080:8000"`.
-
-### 3b. Run locally without Docker
-
-Requires Python 3.10 to 3.12.
-
-```bash
-python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-python run.py
-```
-
-The first start downloads the embedding model (about 90 MB).
-
-### Check that it is healthy
-
-```bash
-curl http://localhost:8000/api/health
-```
-
-Expected: `{"status":"ok","groq":true,"pinecone":true,"tavily":true}`. A `false` value means that key is missing in `.env`.
-
----
-
-## Seeding the knowledge base
-
-Seeding is optional, since live PubMed search works without it, but it makes answers faster and richer. It loads systematic reviews, meta-analyses, randomised trials and guidelines into Pinecone.
-
-```bash
-# Default topics (diabetes, hypertension, statins, asthma, vitamin D,
-# COVID-19 vaccines, antibiotic resistance, migraine, mammography, depression)
-docker compose exec medverify python -m scripts.ingest_seed_kb
-
-# Your own topics
-docker compose exec medverify python -m scripts.ingest_seed_kb "gout treatment" "migraine prevention"
-```
-
-Inspect what retrieval returns for a query, without involving the LLM:
-
-```bash
-docker compose exec -T medverify python - "Does metformin reduce cardiovascular risk?" < scripts/test_retrieval.py
-```
-
-You can also upload your own PDF, DOCX, TXT or MD files from the **Admin** panel in the UI, using your `ADMIN_API_KEY`.
-
----
-
-## Using the app
-
-Ask a medical research question, for example:
-
-> Does metformin reduce cardiovascular risk in type 2 diabetes?
-
-The right-hand panel explains the answer:
-
-- **Evidence:** every cited source with study type, year, journal, PMID or DOI and the supporting passage.
-- **Claim checks:** each statement with its verdict, including claims that were removed.
-- **Pipeline:** the full path the agent took, with timing.
-
-Things worth trying:
-
-| Input | Expected behaviour |
-|---|---|
-| A question matching a seeded topic | Answer with knowledge-base and PubMed sources |
-| A medical question outside the seeded topics | Live PubMed and possibly trusted web fallback |
-| `Hello` | Direct reply, no retrieval |
-| `I have chest pain and can't breathe` | Emergency message, no research answer |
-| `Should I stop taking my statin?` | General research answer with a personal-advice notice |
-| A fictional or nonsense medical question | Transparent "insufficient evidence" reply |
 
 ---
 
@@ -329,23 +371,23 @@ Admin endpoints require the header `X-Admin-Key: <ADMIN_API_KEY>`.
 
 Set these in `.env`.
 
-| Variable | Description | Default |
+| Variable | Description | Default or example |
 |---|---|---|
 | `GROQ_API_KEY` | Groq API key | none |
-| `GROQ_FAST_MODEL` | Model for routing, grading and query rewriting | `llama-3.1-8b-instant` in `.env.example` |
-| `GROQ_STRONG_MODEL` | Model for generation and verification | `llama-3.3-70b-versatile` in `.env.example` |
+| `GROQ_FAST_MODEL` | Model for routing, grading and query rewriting | `openai/gpt-oss-20b` |
+| `GROQ_STRONG_MODEL` | Model for generation and verification | `openai/gpt-oss-120b` |
 | `TAVILY_API_KEY` | Tavily API key | none |
 | `PINECONE_API_KEY` | Pinecone API key | none |
 | `PINECONE_INDEX` | Index name, created automatically | `medverify-kb` |
 | `PINECONE_NAMESPACE` | Namespace inside the index | `medical-literature` |
 | `EMBEDDING_MODEL` | Local sentence-transformers model | `sentence-transformers/all-MiniLM-L6-v2` |
-| `NCBI_EMAIL` | Contact email sent to NCBI | `you@example.com` |
+| `NCBI_EMAIL` | Contact email sent to NCBI | your email |
 | `NCBI_API_KEY` | Optional, raises PubMed rate limit | none |
-| `ADMIN_API_KEY` | Key for ingestion endpoints | `change-me...` |
+| `ADMIN_API_KEY` | Key for ingestion endpoints | a long random string |
 | `RATE_LIMIT_PER_MIN` | Requests per minute per IP | `20` |
 | `AUDIT_DB_PATH` | SQLite audit database path | `data/audit.db` |
 
-Groq model availability varies by account and changes over time. List the models your key can use at console.groq.com/docs/models and set the two model variables to names from that list. This project has been run with `openai/gpt-oss-20b` as the fast model and `openai/gpt-oss-120b` as the strong model.
+Groq model availability varies by account and changes over time. List the models your key can use at console.groq.com/docs/models and set the two model variables to names from that list.
 
 Workflow limits such as the number of retrieved passages, correction rounds and evidence age are defined in `app/core/config.py`.
 
@@ -367,17 +409,16 @@ They cover safety rules, PII redaction, the source allowlist, study-type tiers, 
 
 ---
 
-## Troubleshooting
+## Engineering notes
 
-| Problem | Likely cause and fix |
-|---|---|
-| `Bind for 0.0.0.0:8000 failed: port is already allocated` | Another process uses port 8000. Change the mapping to `"8080:8000"` or stop the other process. |
-| Docker build fails with `BrokenPipeError` during pip install | An unstable download. Rebuild with `docker compose build`, and the pip cache will resume. |
-| `Groq error 404 ... model_not_found` | The model is unavailable to your key. Pick a model from your account's list and update `.env`. |
-| `Groq error 400 ... json_validate_failed` | Use JSON-schema structured outputs as implemented in `app/services/llm.py`. Prefer `gpt-oss-120b` for strict mode. |
-| `429` or rate-limit messages | Free-tier limits. Wait a minute, or lower the number of evidence passages in `config.py`. |
-| Request hangs on the first question | The first run loads the embedding model and creates the Pinecone index, which can take a minute or two. |
-| Changes to code have no effect | The code is baked into the image. Run `docker compose build` and `docker compose up -d --force-recreate`. Changes to `.env` only need the recreate step. |
+Problems met while building this, and how they were solved:
+
+- **Lock deadlock when creating the Pinecone index.** Creating the index needed the embedding model while the same non-reentrant lock was held. Switching to a re-entrant lock (`RLock`) fixed the hang on first run.
+- **Unreliable JSON from reasoning models.** Groq's plain JSON mode failed with the `gpt-oss` models. Every JSON step now uses a JSON schema (strict mode on `gpt-oss-120b`, best effort on `gpt-oss-20b`), with retries and a prompt-only fallback.
+- **Reasoning models running out of tokens.** Extra token headroom and low reasoning effort keep the visible answer from coming back empty.
+- **Free-tier rate limits.** The LLM client retries on 429 and 5xx responses and honours the retry delay. PubMed calls are throttled to stay within NCBI limits.
+- **Hallucinated verification.** A model saying "supported" is not trusted on its own. The quoted excerpt must also be found in the cited source.
+- **Docker build on unstable connections.** A pip cache mount and extra retries let interrupted builds resume.
 
 ---
 
@@ -388,5 +429,3 @@ They cover safety rules, PII redaction, the source allowlist, study-type tiers, 
 - **Rule-based emergency detection** is conservative and keyword-based. It can block some legitimate research phrasing and can miss unusual wording. It is not a triage tool.
 - **Free-tier constraints.** Each question makes several LLM calls, so Groq rate limits apply. Terms and limits of all free services can change.
 - **Latency.** A full run with verification and correction can take over a minute.
-
----
